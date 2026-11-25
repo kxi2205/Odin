@@ -47,6 +47,7 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Footer, Header, Input, Label, Static
 
 from odin.backend import OdinBackend
+from odin.config import config
 from odin.state import RunHistory
 
 logger = logging.getLogger(__name__)
@@ -150,13 +151,14 @@ class OdinTUI(App):
     Screen { layout: grid; grid-size: 2 3; grid-rows: auto 1fr auto; }
 
     #input-container  { column-span: 2; height: auto; padding: 1; background: $panel; }
+    #button-row       { height: auto; margin-top: 1; }
     #main-container   { column-span: 2; height: 1fr; }
     #code-display     { width: 60%; height: 100%; border: solid $primary; padding: 1; }
     #info-panel       { width: 40%; height: 100%; border: solid $secondary; padding: 1; }
     #status-container { column-span: 2; height: auto; padding: 1; background: $panel; }
 
-    Input  { width: 100%; margin-bottom: 1; }
-    Button { margin-right: 1; }
+    Input  { width: 100%; margin-bottom: 0; }
+    Button { height: 3; margin-right: 1; }
     #feedback-input { display: none; }
     #feedback-label { display: none; }
     """
@@ -200,7 +202,7 @@ class OdinTUI(App):
                 id="feedback-input",
             )
 
-            with Horizontal():
+            with Horizontal(id="button-row"):
                 yield Button("Run", id="run-button", variant="primary")
                 yield Button("Send Feedback", id="feedback-button", variant="warning")
                 yield Button("Clear", id="clear-button")
@@ -215,7 +217,7 @@ class OdinTUI(App):
                 yield HistoryPanel(id="history-widget")
 
         with Container(id="status-container"):
-            yield Static("Ready", id="status-widget")
+            yield Static(f"Ready — model: {config.gemini_model}", id="status-widget")
 
         yield Footer()
 
@@ -339,7 +341,7 @@ class OdinTUI(App):
                     title = f"Code — iteration {last.iteration} ({last.files[0].path})"
                     code_widget.update_code(title, last.files[0].content)
 
-        # Execution output
+        # Execution output (or pipeline/API error if execution never ran)
         if run_history.executions:
             ex = run_history.executions[-1]
             txt = f"=== Iteration {ex.iteration} ===\n"
@@ -348,7 +350,16 @@ class OdinTUI(App):
             if ex.stderr:
                 txt += f"STDERR:\n{ex.stderr}\n"
             txt += f"Exit code: {ex.exit_code}  ({ex.execution_time_ms:.0f}ms)"
+            if run_history.error_message:
+                txt += f"\n\nPIPELINE ERROR:\n{run_history.error_message}"
             output_widget.update(txt)
+        elif run_history.error_message:
+            output_widget.update(
+                f"=== Pipeline / API Error ===\n"
+                f"Model: {config.gemini_model}\n"
+                f"{run_history.error_message}\n\n"
+                f"Tip: Check GEMINI_API_KEY / GEMINI_MODEL in .env or see odin.log for full traceback."
+            )
 
         # Iteration transparency panel
         category = run_history.error_analyses[-1].category if run_history.error_analyses else ""
@@ -384,8 +395,9 @@ class OdinTUI(App):
             self._set_status("✗ Max iterations reached — no files written to output dir")
             history_widget.add("✗ Max iterations reached")
         else:
-            self._set_status("✗ Failed — no files written to output dir")
-            history_widget.add("✗ Failed")
+            err_short = (run_history.error_message or "Unknown error").splitlines()[0][:120]
+            self._set_status(f"✗ Failed: {err_short}")
+            history_widget.add(f"✗ Failed: {err_short[:70]}")
 
     def _copy_output_files(self, run_history: RunHistory, output_dir: str) -> str:
         """Copy the final generated files to the user's chosen output directory.

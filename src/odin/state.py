@@ -112,6 +112,7 @@ class RunHistory(BaseModel):
     stage_timestamps: dict[str, list[datetime]] = Field(default_factory=dict)
 
     final_status: Literal["success", "failure", "max_iterations_reached"] | None = None
+    error_message: str | None = None
     total_iterations: int = 0
 
     def add_stage_timestamp(self, stage_name: str, timestamp: datetime | None = None) -> None:

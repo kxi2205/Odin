@@ -204,8 +204,9 @@ class OdinBackend:
             if not run_history.final_status and isinstance(final_state, dict):
                 if final_state.get("success"):
                     run_history.finalize("success")
-        except Exception:
+        except Exception as exc:
             logger.exception("Pipeline raised an exception")
+            run_history.error_message = f"{type(exc).__name__}: {exc}"
             if not run_history.final_status:
                 run_history.finalize("failure")
         finally:

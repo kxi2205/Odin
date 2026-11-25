@@ -557,3 +557,32 @@ class TestContinuationDoesNotQueryRunMemory:
 
         mock_rm_cls.assert_not_called()
         assert rh.final_status == "success"
+
+    @pytest.mark.asyncio
+    async def test_backend_records_error_message_on_exception(self, tmp_outputs):
+        """API/pipeline exceptions are captured in run_history.error_message and persisted."""
+        with (
+            patch("odin.backend.build_graph") as mock_build,
+            patch("odin.backend.RunHistoryPersistence") as mock_pers_cls,
+        ):
+            mock_graph = MagicMock()
+            mock_graph.ainvoke = AsyncMock(side_effect=RuntimeError("503 UNAVAILABLE"))
+            mock_build.return_value = mock_graph
+
+            real_persistence = RunHistoryPersistence(tmp_outputs)
+            mock_pers_cls.return_value = real_persistence
+
+            with patch("odin.backend.config") as mock_cfg:
+                mock_cfg.max_iterations = 3
+                mock_cfg.execution_timeout = 5
+                mock_cfg.validate_config = MagicMock()
+                mock_cfg.ensure_directories = MagicMock()
+
+                from odin.backend import OdinBackend
+                backend = OdinBackend(use_run_memory=False)
+                rh = await backend.run_pipeline("test failure diagnostics")
+
+        assert rh.final_status == "failure"
+        assert rh.error_message == "RuntimeError: 503 UNAVAILABLE"
+        reloaded = real_persistence.load_run(rh.run_id)
+        assert reloaded.error_message == "RuntimeError: 503 UNAVAILABLE"
