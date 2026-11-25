@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import statistics
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -60,8 +61,9 @@ def _make_run_dir_name(run_id: UUID, requirement: str) -> str:
     return f"run_{str(run_id)[:8]}_{slug}"
 
 
-def _run_dir(run_id: UUID, requirement: str) -> Path:
-    return config.outputs_path / _make_run_dir_name(run_id, requirement)
+def _run_dir(run_id: UUID, requirement: str, storage_path: Path | None = None) -> Path:
+    base = storage_path if storage_path is not None else config.outputs_path
+    return base / _make_run_dir_name(run_id, requirement)
 
 
 def _iteration_dir(run_dir: Path, iteration: int) -> Path:
@@ -89,7 +91,7 @@ class RunHistoryPersistence:
 
         Returns the path to the iteration_N/ folder.
         """
-        run_dir = _run_dir(run_history.run_id, run_history.requirement)
+        run_dir = _run_dir(run_history.run_id, run_history.requirement, self.storage_path)
         iter_dir = _iteration_dir(run_dir, iteration)
         iter_dir.mkdir(parents=True, exist_ok=True)
 
@@ -116,19 +118,17 @@ class RunHistoryPersistence:
     def save_run(self, run_history: RunHistory) -> Path:
         """Write run_summary.json once the run is complete.
 
-        Also calls save_iteration() for any iterations that haven't been flushed
-        yet (handles the case where callers don't call save_iteration mid-run).
+        Also flushes every iteration folder so all code versions and metadata
+        are up to date on disk.
 
         Returns the run folder path.
         """
-        run_dir = _run_dir(run_history.run_id, run_history.requirement)
+        run_dir = _run_dir(run_history.run_id, run_history.requirement, self.storage_path)
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        # Ensure every iteration folder exists
+        # Ensure every iteration folder and metadata file is written/updated
         for cv in run_history.code_versions:
-            iter_dir = _iteration_dir(run_dir, cv.iteration)
-            if not iter_dir.exists():
-                self.save_iteration(run_history, cv.iteration)
+            self.save_iteration(run_history, cv.iteration)
 
         # Determine final working code location
         final_iter = run_history.code_versions[-1].iteration if run_history.code_versions else None
@@ -268,27 +268,48 @@ class RunHistoryPersistence:
                     logger.warning("Could not read %s: %s", fpath, exc)
         return files
 
-    # ── Metrics (unchanged from original) ───────────────────────────────────
+    # ── Metrics ─────────────────────────────────────────────────────────────
 
     def compute_metrics(self, run_id: UUID | str) -> dict[str, Any]:
         run_history = self.load_run(run_id)
-        total_tokens = sum(t["total_tokens"] for t in run_history.token_usage if isinstance(t, dict))
+        total_input_tokens = sum(
+            (t["input_tokens"] if isinstance(t, dict) else t.input_tokens)
+            for t in run_history.token_usage
+        )
+        total_output_tokens = sum(
+            (t["output_tokens"] if isinstance(t, dict) else t.output_tokens)
+            for t in run_history.token_usage
+        )
+        total_tokens = sum(
+            (t["total_tokens"] if isinstance(t, dict) else t.total_tokens)
+            for t in run_history.token_usage
+        )
         total_retrieval_count = sum(
             1 for r in run_history.retrievals
+            if (r.get("triggered") if isinstance(r, dict) else r.triggered)
+        )
+        total_retrieval_tokens = sum(
+            (r.get("total_tokens", 0) if isinstance(r, dict) else r.total_tokens)
+            for r in run_history.retrievals
+            if (r.get("triggered") if isinstance(r, dict) else r.triggered)
+        )
+        total_retrieval_latency_ms = sum(
+            (r.get("retrieval_latency_ms", 0.0) if isinstance(r, dict) else r.retrieval_latency_ms)
+            for r in run_history.retrievals
             if (r.get("triggered") if isinstance(r, dict) else r.triggered)
         )
         execution_times = [
             (e.get("execution_time_ms") if isinstance(e, dict) else e.execution_time_ms)
             for e in run_history.executions
         ]
-        avg_exec = sum(execution_times) / len(execution_times) if execution_times else 0
+        avg_exec = sum(execution_times) / len(execution_times) if execution_times else 0.0
         if run_history.end_time and run_history.start_time:
             total_wall = (
                 datetime.fromisoformat(str(run_history.end_time))
                 - datetime.fromisoformat(str(run_history.start_time))
             ).total_seconds()
         else:
-            total_wall = 0
+            total_wall = 0.0
         category_counts: dict[str, int] = {}
         for ea in run_history.error_analyses:
             cat = ea.get("category") if isinstance(ea, dict) else ea.category
@@ -300,10 +321,58 @@ class RunHistoryPersistence:
             "total_iterations": run_history.total_iterations,
             "success": run_history.final_status == "success",
             "total_wall_time_seconds": total_wall,
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
             "total_llm_tokens": total_tokens,
             "total_retrieval_count": total_retrieval_count,
+            "total_retrieval_decisions": len(run_history.retrievals),
+            "total_retrieval_tokens": total_retrieval_tokens,
+            "total_retrieval_latency_ms": total_retrieval_latency_ms,
+            "total_execution_calls": len(run_history.executions),
             "avg_execution_time_ms": avg_exec,
             "error_category_distribution": category_counts,
+        }
+
+    def compute_batch_metrics(self, run_ids: list[UUID | str]) -> dict[str, Any]:
+        """Aggregate metrics across a batch of runs for experimental evaluation."""
+        per_run = [self.compute_metrics(rid) for rid in run_ids]
+        n = len(per_run)
+        if n == 0:
+            return {
+                "total_runs": 0,
+                "success_rate": 0.0,
+                "first_attempt_success_rate": 0.0,
+                "avg_iterations": 0.0,
+                "median_iterations": 0.0,
+                "retrieval_frequency": 0.0,
+                "total_tokens": 0,
+                "total_retrieval_tokens": 0,
+                "avg_wall_time_seconds": 0.0,
+                "error_category_distribution": {},
+            }
+
+        successes = [m for m in per_run if m["success"]]
+        first_attempt = [m for m in successes if m["total_iterations"] == 1]
+        iterations = [m["total_iterations"] for m in per_run]
+        total_decisions = sum(m["total_retrieval_decisions"] for m in per_run)
+        total_triggered = sum(m["total_retrieval_count"] for m in per_run)
+
+        agg_categories: dict[str, int] = {}
+        for m in per_run:
+            for cat, cnt in m["error_category_distribution"].items():
+                agg_categories[cat] = agg_categories.get(cat, 0) + cnt
+
+        return {
+            "total_runs": n,
+            "success_rate": len(successes) / n,
+            "first_attempt_success_rate": len(first_attempt) / n,
+            "avg_iterations": sum(iterations) / n,
+            "median_iterations": statistics.median(iterations),
+            "retrieval_frequency": (total_triggered / total_decisions) if total_decisions else 0.0,
+            "total_tokens": sum(m["total_llm_tokens"] for m in per_run),
+            "total_retrieval_tokens": sum(m["total_retrieval_tokens"] for m in per_run),
+            "avg_wall_time_seconds": sum(m["total_wall_time_seconds"] for m in per_run) / n,
+            "error_category_distribution": agg_categories,
         }
 
 

@@ -12,7 +12,7 @@ import json
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -161,6 +161,26 @@ class TestIterationFolderStructure:
         assert files[0]["path"] == "main.py"
         assert "s[::-1]" in files[0]["content"]
 
+    def test_compute_metrics_counts_tokens_and_batch(self, tmp_outputs, sample_run):
+        p = RunHistoryPersistence(tmp_outputs)
+        p.save_run(sample_run)
+
+        metrics = p.compute_metrics(sample_run.run_id)
+        assert metrics["success"] is True
+        assert metrics["total_input_tokens"] == 300
+        assert metrics["total_output_tokens"] == 110
+        assert metrics["total_llm_tokens"] == 410
+        assert metrics["total_execution_calls"] == 2
+        assert metrics["error_category_distribution"] == {"logical": 1}
+
+        batch = p.compute_batch_metrics([sample_run.run_id])
+        assert batch["total_runs"] == 1
+        assert batch["success_rate"] == 1.0
+        assert batch["first_attempt_success_rate"] == 0.0
+        assert batch["avg_iterations"] == 2.0
+        assert batch["median_iterations"] == 2.0
+        assert batch["total_tokens"] == 410
+
 
 # ---------------------------------------------------------------------------
 # Test 2: embedding into run_memory
@@ -250,6 +270,7 @@ class TestRunMemoryQuery:
     def _make_run_memory_with_hit(self, tmp_outputs, sample_run, similarity_distance=0.2):
         """Return a RunMemory whose ChromaDB query returns one hit."""
         run_dir = tmp_outputs / _make_run_dir_name(sample_run.run_id, sample_run.requirement)
+        run_dir.mkdir(parents=True, exist_ok=True)
 
         with (
             patch("odin.rag.run_memory.chromadb") as mock_chroma,
@@ -366,9 +387,9 @@ class TestContinuationDoesNotQueryRunMemory:
             patch("odin.backend.RunHistoryPersistence") as mock_pers_cls,
             patch("odin.backend.RunMemory") as mock_rm_cls,
         ):
-            # Graph that does nothing (just returns state)
+            # Graph that succeeds cleanly
             mock_graph = MagicMock()
-            mock_graph.ainvoke = MagicMock(return_value=None)
+            mock_graph.ainvoke = AsyncMock(return_value={"success": True})
             mock_build.return_value = mock_graph
 
             mock_persistence = MagicMock()
@@ -404,7 +425,7 @@ class TestContinuationDoesNotQueryRunMemory:
             patch("odin.backend.RunMemory") as mock_rm_cls,
         ):
             mock_graph = MagicMock()
-            mock_graph.ainvoke = MagicMock(return_value=None)
+            mock_graph.ainvoke = AsyncMock(return_value={"success": True})
             mock_build.return_value = mock_graph
 
             mock_persistence = MagicMock()
@@ -507,3 +528,32 @@ class TestContinuationDoesNotQueryRunMemory:
         assert state["is_continuation"] is True
         assert state["user_feedback"] == "please handle None input"
         assert state["past_run_context"] is None
+
+    @pytest.mark.asyncio
+    async def test_backend_with_run_memory_disabled(self):
+        """Setting use_run_memory=False avoids querying or embedding run_memory."""
+        with (
+            patch("odin.backend.build_graph") as mock_build,
+            patch("odin.backend.RunHistoryPersistence") as mock_pers_cls,
+            patch("odin.backend.RunMemory") as mock_rm_cls,
+        ):
+            mock_graph = MagicMock()
+            mock_graph.ainvoke = AsyncMock(return_value={"success": True})
+            mock_build.return_value = mock_graph
+
+            mock_persistence = MagicMock()
+            mock_persistence.save_run.return_value = Path("/tmp/fake_run")
+            mock_pers_cls.return_value = mock_persistence
+
+            with patch("odin.backend.config") as mock_cfg:
+                mock_cfg.max_iterations = 5
+                mock_cfg.execution_timeout = 5
+                mock_cfg.validate_config = MagicMock()
+                mock_cfg.ensure_directories = MagicMock()
+
+                from odin.backend import OdinBackend
+                backend = OdinBackend(use_run_memory=False)
+                rh = await backend.run_pipeline("reverse a linked list")
+
+        mock_rm_cls.assert_not_called()
+        assert rh.final_status == "success"

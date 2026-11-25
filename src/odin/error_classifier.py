@@ -154,10 +154,11 @@ def classify_error(
             )
         
         # Check if it's a truly obscure pattern
-        if _is_uncommon_pattern(traceback, stderr):
+        uncommon_signal = _detect_uncommon_pattern(traceback, stderr)
+        if uncommon_signal:
             return (
                 "uncommon_pattern",
-                f"{exception_type} in rare/obscure usage pattern",
+                f"{exception_type} in uncommon pattern ({uncommon_signal})",
             )
         
         # Default to runtime for TypeError/AttributeError without special context
@@ -187,9 +188,13 @@ def classify_error(
 def _extract_exception_type(traceback: str) -> Optional[str]:
     """Extract the exception type from a traceback.
     
-    Looks for patterns like "TypeError:" or "AttributeError:" at the start of a line.
+    Looks for patterns like "TypeError:" or bare "AssertionError" at the start of a line.
     """
-    matches = re.findall(r"^([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)):", traceback, re.MULTILINE)
+    matches = re.findall(
+        r"^([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))(?::|\s*$)",
+        traceback,
+        re.MULTILINE,
+    )
     return matches[-1] if matches else None
 
 
@@ -210,7 +215,7 @@ def _detect_library_context(traceback: str) -> Optional[str]:
     return None
 
 
-def _is_uncommon_pattern(traceback: str, stderr: str) -> bool:
+def _detect_uncommon_pattern(traceback: str, stderr: str) -> Optional[str]:
     """Heuristic for detecting uncommon patterns.
     
     This looks for:
@@ -218,21 +223,25 @@ def _is_uncommon_pattern(traceback: str, stderr: str) -> bool:
     - Errors in asyncio/async contexts
     - Complex method chaining or descriptor protocol issues
     
-    This is necessarily imperfect; the threshold is "likely underrepresented
-    in training data" rather than "definitely rare."
+    Returns the matched signal name if detected, else None.
     """
     uncommon_modules = ["itertools", "functools", "collections.abc", "asyncio"]
     
     for module in uncommon_modules:
         if module in traceback:
-            return True
+            return module
     
     # Async-related errors can be uncommon patterns
     if "async" in stderr.lower() or "await" in stderr.lower():
-        return True
+        return "async/await"
     
     # Descriptor protocol issues (less common)
     if "__get__" in stderr or "__set__" in stderr or "__delete__" in stderr:
-        return True
+        return "descriptor protocol"
     
-    return False
+    return None
+
+
+def _is_uncommon_pattern(traceback: str, stderr: str) -> bool:
+    """Boolean wrapper retained for backwards compatibility."""
+    return _detect_uncommon_pattern(traceback, stderr) is not None

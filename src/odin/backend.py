@@ -32,17 +32,18 @@ logger = logging.getLogger(__name__)
 class OdinBackend:
     """Backend interface for running ODIN pipelines."""
 
-    def __init__(self) -> None:
+    def __init__(self, use_run_memory: bool = True) -> None:
         config.validate_config()
         config.ensure_directories()
 
         self._graph = build_graph()
         self._persistence = RunHistoryPersistence()
+        self._use_run_memory = use_run_memory
 
-        # Shared instances — embedding model loaded once
-        self._run_memory = RunMemory()
+        # Shared instances — embedding model loaded once (skipped when memory is disabled)
+        self._run_memory = RunMemory() if use_run_memory else None
 
-        logger.info("ODIN backend initialised")
+        logger.info("ODIN backend initialised (run_memory=%s)", use_run_memory)
 
     # ── New request ──────────────────────────────────────────────────────
 
@@ -52,15 +53,16 @@ class OdinBackend:
         test_input: str = "",
         max_iterations: Optional[int] = None,
         execution_timeout: Optional[int] = None,
+        use_run_memory: Optional[bool] = None,
     ) -> RunHistory:
         """Run a new ODIN pipeline for a fresh requirement.
 
         Steps:
-        1. Query run_memory for a similar past run.
+        1. Query run_memory for a similar past run (if enabled).
         2. Build initial graph state (inject past_run_context if found).
         3. Invoke the LangGraph graph (entry → generate → …).
         4. Write per-iteration folders + run_summary.json to outputs/.
-        5. Embed this run into run_memory.
+        5. Embed this run into run_memory (if enabled).
         6. Return the RunHistory object.
 
         Args:
@@ -68,14 +70,22 @@ class OdinBackend:
             test_input:        Text to pipe to stdin during execution.
             max_iterations:    Override config.max_iterations.
             execution_timeout: Override config.execution_timeout.
+            use_run_memory:    Override whether to query/embed run_memory
+                               (set False for isolated controlled experiments).
 
         Returns:
             Completed RunHistory.
         """
         logger.info("Starting new pipeline: %.100s", requirement)
 
-        # Step 1 — query run_memory (new requests only)
-        past_ctx: PastRunContext | None = self._run_memory.query(requirement)
+        memory_enabled = self._use_run_memory if use_run_memory is None else use_run_memory
+
+        # Step 1 — query run_memory (new requests only, when enabled)
+        past_ctx: PastRunContext | None = (
+            self._run_memory.query(requirement)
+            if memory_enabled and self._run_memory is not None
+            else None
+        )
 
         run_history = RunHistory(requirement=requirement)
 
@@ -97,7 +107,9 @@ class OdinBackend:
             "should_end": False,
         }
 
-        return await self._execute_graph_with_persistence(initial_state, run_history)
+        return await self._execute_graph_with_persistence(
+            initial_state, run_history, embed_to_memory=memory_enabled
+        )
 
     # ── User-feedback continuation ───────────────────────────────────────
 
@@ -106,6 +118,8 @@ class OdinBackend:
         run_history: RunHistory,
         user_feedback: str,
         execution_timeout: Optional[int] = None,
+        max_iterations: Optional[int] = None,
+        embed_to_memory: Optional[bool] = None,
     ) -> RunHistory:
         """Continue an active, unresolved run with explicit user feedback.
 
@@ -122,6 +136,8 @@ class OdinBackend:
             run_history:       The existing RunHistory from the active run.
             user_feedback:     The user's correction / dissatisfaction note.
             execution_timeout: Override config.execution_timeout.
+            max_iterations:    Optional override for max total iterations.
+            embed_to_memory:   Whether to upsert the updated run in run_memory.
 
         Returns:
             Updated RunHistory.
@@ -144,6 +160,13 @@ class OdinBackend:
             else 0
         )
 
+        # Reset final_status so the new continuation cycle sets the final outcome
+        run_history.final_status = None
+        run_history.end_time = None
+
+        target_max = max_iterations or max(config.max_iterations, current_iteration + 1)
+        memory_enabled = self._use_run_memory if embed_to_memory is None else embed_to_memory
+
         state: GraphState = {
             "requirement": run_history.requirement,
             "test_input": "",
@@ -156,21 +179,31 @@ class OdinBackend:
             "last_execution": run_history.executions[-1] if run_history.executions else None,
             "last_error_analysis": run_history.error_analyses[-1] if run_history.error_analyses else None,
             "last_retrieval": run_history.retrievals[-1] if run_history.retrievals else None,
-            "max_iterations": config.max_iterations,
+            "max_iterations": target_max,
             "execution_timeout": execution_timeout or config.execution_timeout,
             "run_history": run_history,
             "success": False,
             "should_end": False,
         }
 
-        return await self._execute_graph_with_persistence(state, run_history)
+        return await self._execute_graph_with_persistence(
+            state, run_history, embed_to_memory=memory_enabled
+        )
 
     # ── Shared Persistence Logic ─────────────────────────────────────────
 
-    async def _execute_graph_with_persistence(self, state: GraphState, run_history: RunHistory) -> RunHistory:
+    async def _execute_graph_with_persistence(
+        self,
+        state: GraphState,
+        run_history: RunHistory,
+        embed_to_memory: bool = True,
+    ) -> RunHistory:
         """Execute the LangGraph workflow, finalize state, save to disk, and embed."""
         try:
-            await self._graph.ainvoke(state)
+            final_state = await self._graph.ainvoke(state)
+            if not run_history.final_status and isinstance(final_state, dict):
+                if final_state.get("success"):
+                    run_history.finalize("success")
         except Exception:
             logger.exception("Pipeline raised an exception")
             if not run_history.final_status:
@@ -182,11 +215,12 @@ class OdinBackend:
             # Write folder structure
             run_dir = self._persistence.save_run(run_history)
 
-            # Embed into run_memory (success and failure both stored)
-            try:
-                self._run_memory.embed_run(run_history, run_dir)
-            except Exception:
-                logger.exception("Failed to embed run into run_memory — non-fatal")
+            # Embed into run_memory (success and failure both stored) when enabled
+            if embed_to_memory and self._run_memory is not None:
+                try:
+                    self._run_memory.embed_run(run_history, run_dir)
+                except Exception:
+                    logger.exception("Failed to embed run into run_memory — non-fatal")
 
         logger.info("Pipeline run complete: %s", run_history.final_status)
         return run_history

@@ -48,15 +48,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-import chromadb
-from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
-
 from odin.config import config
 from odin.persistence import RunHistoryPersistence
 from odin.state import PastRunContext, RunHistory
 
 logger = logging.getLogger(__name__)
+
+# Lazily loaded on first RunMemory instantiation so non-memory code paths
+# (and unit tests that patch these module attributes) avoid PyTorch import overhead.
+chromadb: Any = None
+SentenceTransformer: Any = None
 
 
 class RunMemory:
@@ -67,10 +68,22 @@ class RunMemory:
     """
 
     def __init__(self) -> None:
-        self._model = SentenceTransformer(config.rag_embedding_model)
-        self._client = chromadb.PersistentClient(
+        st_cls = SentenceTransformer
+        if st_cls is None:
+            from sentence_transformers import SentenceTransformer as st_cls
+        self._model = st_cls(config.rag_embedding_model)
+
+        chroma_mod = chromadb
+        if chroma_mod is None:
+            import chromadb as chroma_mod
+            from chromadb.config import Settings
+            client_settings = Settings(anonymized_telemetry=False)
+        else:
+            client_settings = chroma_mod.config.Settings(anonymized_telemetry=False)
+
+        self._client = chroma_mod.PersistentClient(
             path=str(config.chroma_data_path),
-            settings=Settings(anonymized_telemetry=False),
+            settings=client_settings,
         )
         self._collection = self._client.get_or_create_collection(
             name=config.run_memory_collection_name,

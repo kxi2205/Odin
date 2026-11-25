@@ -23,11 +23,7 @@ import argparse
 import logging
 import re
 from pathlib import Path
-from typing import List, Tuple
-
-import chromadb
-from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
+from typing import Any, List
 
 from odin.config import config
 
@@ -60,7 +56,8 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]
 def ingest_documentation(
     source_dir: Path,
     collection,
-    embedding_model: SentenceTransformer,
+    embedding_model: Any,
+    exclude_files: set[Path] | None = None,
 ) -> int:
     """Ingest documentation files from a directory.
     
@@ -70,6 +67,7 @@ def ingest_documentation(
         source_dir: Directory containing documentation files
         collection: ChromaDB collection
         embedding_model: Sentence transformer model
+        exclude_files: Optional set of resolved file paths to skip (e.g. examples.md)
     
     Returns:
         Number of chunks ingested
@@ -80,9 +78,13 @@ def ingest_documentation(
         logger.warning(f"Source directory {source_dir} does not exist")
         return 0
     
+    excluded = {p.resolve() for p in (exclude_files or set())}
     chunks_ingested = 0
     
     for doc_file in source_dir.rglob("*.md"):
+        if doc_file.resolve() in excluded:
+            logger.info(f"Skipping {doc_file} (ingested separately)")
+            continue
         logger.info(f"Processing {doc_file}")
         
         content = doc_file.read_text(encoding="utf-8")
@@ -99,7 +101,7 @@ def ingest_documentation(
                 "library": _infer_library(doc_file.name),
             }
             
-            collection.add(
+            collection.upsert(
                 ids=[chunk_id],
                 embeddings=[embedding],
                 documents=[chunk],
@@ -115,7 +117,7 @@ def ingest_documentation(
 def ingest_examples(
     examples_file: Path,
     collection,
-    embedding_model: SentenceTransformer,
+    embedding_model: Any,
 ) -> int:
     """Ingest curated error-fix examples.
     
@@ -165,7 +167,7 @@ def ingest_examples(
             "description": description.strip(),
         }
         
-        collection.add(
+        collection.upsert(
             ids=[example_id],
             embeddings=[embedding],
             documents=[example_text],
@@ -178,7 +180,7 @@ def ingest_examples(
 
 def ingest_python_stdlib_docs(
     collection,
-    embedding_model: SentenceTransformer,
+    embedding_model: Any,
 ) -> int:
     """Ingest basic Python standard library documentation snippets.
     
@@ -245,7 +247,7 @@ def ingest_python_stdlib_docs(
             "category": doc["category"],
         }
         
-        collection.add(
+        collection.upsert(
             ids=[doc_id],
             embeddings=[embedding],
             documents=[doc["content"]],
@@ -293,6 +295,10 @@ def main():
     
     # Ensure directories exist
     config.ensure_directories()
+
+    import chromadb
+    from chromadb.config import Settings
+    from sentence_transformers import SentenceTransformer
     
     # Initialize embedding model
     logger.info(f"Loading embedding model: {config.rag_embedding_model}")
@@ -305,15 +311,16 @@ def main():
     )
     
     # Create or get collection
+    collection_name = config.knowledge_collection_name
     if args.reset:
         try:
-            client.delete_collection("odin_knowledge")
+            client.delete_collection(collection_name)
             logger.info("Deleted existing collection")
         except Exception:
             pass
     
     collection = client.get_or_create_collection(
-        name="odin_knowledge",
+        name=collection_name,
         metadata={"description": "Python documentation and code examples for ODIN"}
     )
     
@@ -323,9 +330,12 @@ def main():
     # Always ingest built-in stdlib docs
     total_chunks += ingest_python_stdlib_docs(collection, embedding_model)
     
-    # Ingest documentation if source dir exists
+    # Ingest documentation if source dir exists (excluding examples_file to avoid duplicates)
     if args.source_dir.exists():
-        total_chunks += ingest_documentation(args.source_dir, collection, embedding_model)
+        exclude = {args.examples_file} if args.examples_file.exists() else set()
+        total_chunks += ingest_documentation(
+            args.source_dir, collection, embedding_model, exclude_files=exclude
+        )
     else:
         logger.info(f"Source directory {args.source_dir} not found, skipping documentation ingest")
     

@@ -141,8 +141,8 @@ def _execute_single_file(code: str, timeout: int, test_input: str) -> dict:
         }
     
     except subprocess.TimeoutExpired as e:
-        stdout = e.stdout.decode("utf-8") if e.stdout else ""
-        stderr = e.stderr.decode("utf-8") if e.stderr else ""
+        stdout = _decode_output(e.stdout)
+        stderr = _decode_output(e.stderr)
         
         return {
             "stdout": stdout,
@@ -236,8 +236,8 @@ runpy.run_path("{rel_main}", run_name="__main__")
             }
         
         except subprocess.TimeoutExpired as e:
-            stdout = e.stdout.decode("utf-8") if e.stdout else ""
-            stderr = e.stderr.decode("utf-8") if e.stderr else ""
+            stdout = _decode_output(e.stdout)
+            stderr = _decode_output(e.stderr)
             
             return {
                 "stdout": stdout,
@@ -245,6 +245,15 @@ runpy.run_path("{rel_main}", run_name="__main__")
                 "exit_code": -1,
                 "traceback": f"TimeoutError: Execution exceeded {timeout} seconds",
             }
+
+
+def _decode_output(data: bytes | str | None) -> str:
+    """Safely convert subprocess stdout/stderr (bytes, str, or None) to str."""
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data
 
 
 def _extract_traceback(stderr: str) -> str:

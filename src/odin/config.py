@@ -24,7 +24,9 @@ class OdinConfig(BaseModel):
     gemini_api_key: str = Field(
         default_factory=lambda: os.getenv("GEMINI_API_KEY", "")
     )
-    gemini_model: str = "gemini-3.8-flash"
+    gemini_model: str = Field(
+        default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+    )
 
     # ── Pipeline ──────────────────────────────────────────────────────────
     max_iterations: int = Field(

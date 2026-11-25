@@ -11,16 +11,39 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from odin.config import config
 from odin.state import FileContent, PastRunContext, RetrievalRecord, TokenUsage
 
 logger = logging.getLogger(__name__)
 
-genai.configure(api_key=config.gemini_api_key)
+_GEN_CFG = types.GenerateContentConfig(temperature=0.2, max_output_tokens=4096)
 
-_GEN_CFG = genai.types.GenerationConfig(temperature=0.2, max_output_tokens=4096)
+
+def _get_client() -> genai.Client:
+    """Create a Gemini client lazily using the configured API key."""
+    return genai.Client(api_key=config.gemini_api_key)
+
+
+def _extract_token_usage(
+    response,
+    iteration: int,
+    call_type: str,
+) -> TokenUsage:
+    """Safely extract TokenUsage from a google-genai response."""
+    usage = getattr(response, "usage_metadata", None)
+    input_tokens = getattr(usage, "prompt_token_count", 0) or 0
+    output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+    total_tokens = getattr(usage, "total_token_count", 0) or (input_tokens + output_tokens)
+    return TokenUsage(
+        iteration=iteration,
+        call_type=call_type,  # type: ignore[arg-type]
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -55,17 +78,15 @@ def generate_code(
     else:
         prompt = _build_single_file_generate_prompt(requirement, past_run_context)
 
-    model = genai.GenerativeModel(config.gemini_model)
-    response = model.generate_content(prompt, generation_config=_GEN_CFG)
-
-    token_usage = TokenUsage(
-        iteration=iteration,
-        call_type="generate",
-        input_tokens=response.usage_metadata.prompt_token_count,
-        output_tokens=response.usage_metadata.candidates_token_count,
-        total_tokens=response.usage_metadata.total_token_count,
+    client = _get_client()
+    response = client.models.generate_content(
+        model=config.gemini_model,
+        contents=prompt,
+        config=_GEN_CFG,
     )
-    files = _parse_code_response(response.text, is_multi_file)
+
+    token_usage = _extract_token_usage(response, iteration, "generate")
+    files = _parse_code_response(response.text or "", is_multi_file)
     logger.info("Generated %d file(s), tokens: %d", len(files), token_usage.total_tokens)
     return files, token_usage
 
@@ -100,18 +121,16 @@ def repair_code(
             requirement, relevant_files, error_message, traceback, retrieval
         )
 
-    model = genai.GenerativeModel(config.gemini_model)
-    response = model.generate_content(prompt, generation_config=_GEN_CFG)
-
-    token_usage = TokenUsage(
-        iteration=iteration,
-        call_type="repair",
-        input_tokens=response.usage_metadata.prompt_token_count,
-        output_tokens=response.usage_metadata.candidates_token_count,
-        total_tokens=response.usage_metadata.total_token_count,
+    client = _get_client()
+    response = client.models.generate_content(
+        model=config.gemini_model,
+        contents=prompt,
+        config=_GEN_CFG,
     )
+
+    token_usage = _extract_token_usage(response, iteration, "repair")
     is_multi = len(previous_files) > 1
-    files = _parse_code_response(response.text, is_multi)
+    files = _parse_code_response(response.text or "", is_multi)
     logger.info("Repaired %d file(s), tokens: %d", len(files), token_usage.total_tokens)
     return files, token_usage
 
@@ -141,17 +160,15 @@ def apply_feedback(
     is_multi = len(current_files) > 1
     prompt = _build_feedback_prompt(requirement, current_files, user_feedback, is_multi)
 
-    model = genai.GenerativeModel(config.gemini_model)
-    response = model.generate_content(prompt, generation_config=_GEN_CFG)
-
-    token_usage = TokenUsage(
-        iteration=iteration,
-        call_type="feedback",
-        input_tokens=response.usage_metadata.prompt_token_count,
-        output_tokens=response.usage_metadata.candidates_token_count,
-        total_tokens=response.usage_metadata.total_token_count,
+    client = _get_client()
+    response = client.models.generate_content(
+        model=config.gemini_model,
+        contents=prompt,
+        config=_GEN_CFG,
     )
-    files = _parse_code_response(response.text, is_multi)
+
+    token_usage = _extract_token_usage(response, iteration, "feedback")
+    files = _parse_code_response(response.text or "", is_multi)
     logger.info("Feedback revision produced %d file(s), tokens: %d", len(files), token_usage.total_tokens)
     return files, token_usage
 
