@@ -134,3 +134,58 @@ def test_resource_limits_cpu():
     res_multi = execute_code(files_multi, timeout=1)
     assert res_multi.success is False
 
+
+def test_single_file_isolated_temp_dir(tmp_path, monkeypatch):
+    """Single-file runs execute inside an isolated temp dir, not the caller cwd."""
+    monkeypatch.chdir(tmp_path)
+    code = "with open('stray_file.txt', 'w') as f: f.write('hello')\nprint('ok')"
+    result = execute_code([FileContent(path="main.py", content=code)], timeout=5)
+
+    assert result.success is True
+    assert not (tmp_path / "stray_file.txt").exists()
+
+
+def test_sandbox_strips_secret_env_vars(monkeypatch):
+    """Secret env vars like GEMINI_API_KEY must not leak into executed code."""
+    monkeypatch.setenv("GEMINI_API_KEY", "super_secret_test_key")
+    code = "import os\nprint(os.getenv('GEMINI_API_KEY', 'REDACTED'))"
+    result = execute_code([FileContent(path="main.py", content=code)], timeout=5)
+
+    assert result.success is True
+    assert result.stdout.strip() == "REDACTED"
+
+
+def test_test_cases_verifier_all_pass():
+    code = "def add(a, b):\n    return a + b\n"
+    tests = "assert add(1, 2) == 3\nassert add(-1, 1) == 0\nassert add(0, 0) == 0"
+    result = execute_code([FileContent(path="main.py", content=code)], timeout=5, test_cases=tests)
+
+    assert result.success is True
+    assert result.test_passed is True
+    assert result.tests_passed == 3
+    assert result.tests_total == 3
+
+
+def test_test_cases_verifier_partial_failure():
+    code = "def add(a, b):\n    return a - b  # bug\n"
+    tests = "assert add(0, 0) == 0\nassert add(2, 3) == 5"
+    result = execute_code([FileContent(path="main.py", content=code)], timeout=5, test_cases=tests)
+
+    assert result.success is False
+    assert result.test_passed is False
+    assert result.tests_passed == 1
+    assert result.tests_total == 2
+    assert "AssertionError" in result.stderr
+
+
+def test_expected_output_mismatch_fails_as_logical():
+    code = "print(41)"
+    result = execute_code([FileContent(path="main.py", content=code)], timeout=5, expected_output="42")
+
+    assert result.success is False
+    assert result.test_passed is False
+    assert result.tests_passed == 0
+    assert result.tests_total == 1
+    assert "AssertionError" in result.stderr
+
+

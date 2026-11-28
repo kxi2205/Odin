@@ -41,6 +41,12 @@ class OdinConfig(BaseModel):
     sandbox_file_size_limit_mb: int = Field(
         default_factory=lambda: int(os.getenv("ODIN_SANDBOX_FILE_SIZE_MB", "10"))
     )
+    sandbox_mode: str = Field(
+        default_factory=lambda: os.getenv("ODIN_SANDBOX_MODE", "subprocess").lower()
+    )
+    sandbox_docker_image: str = Field(
+        default_factory=lambda: os.getenv("ODIN_SANDBOX_DOCKER_IMAGE", "python:3.12-slim")
+    )
     repair_token_limit: int = Field(
         default_factory=lambda: int(os.getenv("ODIN_REPAIR_TOKEN_LIMIT", "30000"))
     )

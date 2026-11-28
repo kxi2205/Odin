@@ -139,6 +139,10 @@ class RunHistoryPersistence:
         summary = {
             "run_id": str(run_history.run_id),
             "requirement": run_history.requirement,
+            "experiment_mode": run_history.experiment_mode,
+            "test_input": run_history.test_input,
+            "test_cases": run_history.test_cases,
+            "expected_output": run_history.expected_output,
             "final_status": run_history.final_status,
             "error_message": run_history.error_message,
             "total_iterations": run_history.total_iterations,
@@ -208,6 +212,10 @@ class RunHistoryPersistence:
         run_history = RunHistory(
             run_id=summary["run_id"],
             requirement=summary["requirement"],
+            experiment_mode=summary.get("experiment_mode", "adaptive_rag"),
+            test_input=summary.get("test_input", ""),
+            test_cases=summary.get("test_cases", ""),
+            expected_output=summary.get("expected_output", ""),
             start_time=summary.get("start_time"),
             end_time=summary.get("end_time"),
             final_status=summary.get("final_status"),
@@ -316,12 +324,27 @@ class RunHistoryPersistence:
         for ea in run_history.error_analyses:
             cat = ea.get("category") if isinstance(ea, dict) else ea.category
             category_counts[cat] = category_counts.get(cat, 0) + 1
+
+        last_exec = run_history.executions[-1] if run_history.executions else None
+        if last_exec is not None:
+            t_passed = last_exec.get("tests_passed", 0) if isinstance(last_exec, dict) else last_exec.tests_passed
+            t_total = last_exec.get("tests_total", 0) if isinstance(last_exec, dict) else last_exec.tests_total
+        else:
+            t_passed, t_total = 0, 0
+        test_pass_rate = (t_passed / t_total) if t_total > 0 else (1.0 if run_history.final_status == "success" else 0.0)
+        partial_repair = bool(t_total > 0 and 0 < t_passed < t_total)
+
         return {
             "run_id": str(run_history.run_id),
             "requirement": run_history.requirement,
+            "experiment_mode": run_history.experiment_mode,
             "final_status": run_history.final_status,
             "total_iterations": run_history.total_iterations,
             "success": run_history.final_status == "success",
+            "tests_passed": t_passed,
+            "tests_total": t_total,
+            "test_pass_rate": test_pass_rate,
+            "partial_repair": partial_repair,
             "total_wall_time_seconds": total_wall,
             "total_input_tokens": total_input_tokens,
             "total_output_tokens": total_output_tokens,
@@ -343,7 +366,9 @@ class RunHistoryPersistence:
             return {
                 "total_runs": 0,
                 "success_rate": 0.0,
+                "test_pass_rate": 0.0,
                 "first_attempt_success_rate": 0.0,
+                "partial_repair_rate": 0.0,
                 "avg_iterations": 0.0,
                 "median_iterations": 0.0,
                 "retrieval_frequency": 0.0,
@@ -355,6 +380,7 @@ class RunHistoryPersistence:
 
         successes = [m for m in per_run if m["success"]]
         first_attempt = [m for m in successes if m["total_iterations"] == 1]
+        partial_repairs = [m for m in per_run if m["partial_repair"]]
         iterations = [m["total_iterations"] for m in per_run]
         total_decisions = sum(m["total_retrieval_decisions"] for m in per_run)
         total_triggered = sum(m["total_retrieval_count"] for m in per_run)
@@ -367,7 +393,9 @@ class RunHistoryPersistence:
         return {
             "total_runs": n,
             "success_rate": len(successes) / n,
+            "test_pass_rate": sum(m["test_pass_rate"] for m in per_run) / n,
             "first_attempt_success_rate": len(first_attempt) / n,
+            "partial_repair_rate": len(partial_repairs) / n,
             "avg_iterations": sum(iterations) / n,
             "median_iterations": statistics.median(iterations),
             "retrieval_frequency": (total_triggered / total_decisions) if total_decisions else 0.0,

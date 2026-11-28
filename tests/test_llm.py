@@ -57,3 +57,38 @@ def test_select_relevant_files_token_truncation():
         assert "other.py" not in paths # truncated
     finally:
         config.repair_token_limit = original_limit
+
+
+def test_clean_single_file_strips_file_header_and_fences():
+    from odin.llm import _parse_code_response
+
+    raw = "```python\nFILE: main.py\nimport sys\nprint('hi')\n```"
+    files = _parse_code_response(raw, is_multi_file=False)
+    assert len(files) == 1
+    assert files[0].path == "main.py"
+    assert not files[0].content.startswith("FILE:")
+    assert files[0].content.startswith("import sys")
+
+
+def test_single_file_feedback_prompt_omits_file_header():
+    from odin.llm import _build_feedback_prompt
+
+    prompt = _build_feedback_prompt(
+        requirement="palindrome checker",
+        current_files=[FileContent(path="main.py", content="print('ok')")],
+        user_feedback="read input from stdin",
+        is_multi=False,
+    )
+    assert "FILE: main.py" not in prompt
+    assert "Do NOT include any FILE: header lines" in prompt
+
+
+def test_format_previous_attempts_includes_history():
+    from odin.llm import _format_previous_attempts
+
+    txt = _format_previous_attempts([
+        {"iteration": "1", "category": "runtime", "error": "ZeroDivisionError"},
+    ])
+    assert "Iteration 1 [runtime]" in txt
+    assert "ZeroDivisionError" in txt
+

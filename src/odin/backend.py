@@ -24,7 +24,7 @@ from odin.config import config
 from odin.graph import build_graph
 from odin.persistence import RunHistoryPersistence
 from odin.rag.run_memory import RunMemory
-from odin.state import GraphState, PastRunContext, RunHistory
+from odin.state import ExperimentMode, GraphState, PastRunContext, RunHistory
 
 logger = logging.getLogger(__name__)
 
@@ -54,31 +54,30 @@ class OdinBackend:
         max_iterations: Optional[int] = None,
         execution_timeout: Optional[int] = None,
         use_run_memory: Optional[bool] = None,
+        test_cases: str = "",
+        expected_output: str = "",
+        experiment_mode: ExperimentMode = "adaptive_rag",
     ) -> RunHistory:
         """Run a new ODIN pipeline for a fresh requirement.
-
-        Steps:
-        1. Query run_memory for a similar past run (if enabled).
-        2. Build initial graph state (inject past_run_context if found).
-        3. Invoke the LangGraph graph (entry → generate → …).
-        4. Write per-iteration folders + run_summary.json to outputs/.
-        5. Embed this run into run_memory (if enabled).
-        6. Return the RunHistory object.
 
         Args:
             requirement:       NL task description.
             test_input:        Text to pipe to stdin during execution.
-            max_iterations:    Override config.max_iterations.
+            max_iterations:    Override config.max_iterations (forced to 1 in 'direct' mode).
             execution_timeout: Override config.execution_timeout.
             use_run_memory:    Override whether to query/embed run_memory
                                (set False for isolated controlled experiments).
+            test_cases:        Optional Python assert test suite for functional verification.
+            expected_output:   Optional expected stdout for stdin/DSA verification.
+            experiment_mode:   'direct' | 'no_rag' | 'adaptive_rag' | 'always_rag'.
 
         Returns:
             Completed RunHistory.
         """
-        logger.info("Starting new pipeline: %.100s", requirement)
+        logger.info("Starting new pipeline [%s]: %.100s", experiment_mode, requirement)
 
         memory_enabled = self._use_run_memory if use_run_memory is None else use_run_memory
+        effective_max = 1 if experiment_mode == "direct" else (max_iterations or config.max_iterations)
 
         # Step 1 — query run_memory (new requests only, when enabled)
         past_ctx: PastRunContext | None = (
@@ -87,11 +86,20 @@ class OdinBackend:
             else None
         )
 
-        run_history = RunHistory(requirement=requirement)
+        run_history = RunHistory(
+            requirement=requirement,
+            experiment_mode=experiment_mode,
+            test_input=test_input,
+            test_cases=test_cases,
+            expected_output=expected_output,
+        )
 
         initial_state: GraphState = {
             "requirement": requirement,
             "test_input": test_input,
+            "test_cases": test_cases,
+            "expected_output": expected_output,
+            "experiment_mode": experiment_mode,
             "is_continuation": False,
             "user_feedback": "",
             "past_run_context": past_ctx,
@@ -100,7 +108,7 @@ class OdinBackend:
             "last_execution": None,
             "last_error_analysis": None,
             "last_retrieval": None,
-            "max_iterations": max_iterations or config.max_iterations,
+            "max_iterations": effective_max,
             "execution_timeout": execution_timeout or config.execution_timeout,
             "run_history": run_history,
             "success": False,
@@ -120,27 +128,14 @@ class OdinBackend:
         execution_timeout: Optional[int] = None,
         max_iterations: Optional[int] = None,
         embed_to_memory: Optional[bool] = None,
+        test_input: Optional[str] = None,
+        test_cases: Optional[str] = None,
+        expected_output: Optional[str] = None,
     ) -> RunHistory:
-        """Continue an active, unresolved run with explicit user feedback.
+        """Continue an active run with explicit user feedback.
 
-        This does NOT query run_memory.  The run_history object from the
-        active session is passed directly so the graph picks up from where
-        it left off.
-
-        After the graph completes, iteration folders for the new attempts are
-        appended to the existing run folder, and run_summary.json is updated.
-        The run is then re-embedded into run_memory (upsert) to reflect the
-        latest outcome.
-
-        Args:
-            run_history:       The existing RunHistory from the active run.
-            user_feedback:     The user's correction / dissatisfaction note.
-            execution_timeout: Override config.execution_timeout.
-            max_iterations:    Optional override for max total iterations.
-            embed_to_memory:   Whether to upsert the updated run in run_memory.
-
-        Returns:
-            Updated RunHistory.
+        Preserves or updates test_input/test_cases/expected_output and gives a
+        fresh repair budget so feedback revisions are properly verified and saved.
         """
         logger.info(
             "Continuing run %s with user feedback: %.80s",
@@ -148,7 +143,6 @@ class OdinBackend:
             user_feedback,
         )
 
-        # Current files = last generated version in this run
         current_files = (
             run_history.code_versions[-1].files
             if run_history.code_versions
@@ -160,16 +154,33 @@ class OdinBackend:
             else 0
         )
 
-        # Reset final_status so the new continuation cycle sets the final outcome
+        effective_test_input = run_history.test_input if test_input is None else test_input
+        effective_test_cases = run_history.test_cases if test_cases is None else test_cases
+        effective_expected = run_history.expected_output if expected_output is None else expected_output
+        run_history.test_input = effective_test_input
+        run_history.test_cases = effective_test_cases
+        run_history.expected_output = effective_expected
+
+        # Reset status so the new continuation cycle sets the final outcome cleanly
         run_history.final_status = None
+        run_history.error_message = None
         run_history.end_time = None
 
-        target_max = max_iterations or max(config.max_iterations, current_iteration + 1)
+        # Give a fresh continuation budget (e.g. up to config.max_iterations new attempts)
+        target_max = max_iterations or (current_iteration + config.max_iterations)
         memory_enabled = self._use_run_memory if embed_to_memory is None else embed_to_memory
+        mode: ExperimentMode = (
+            run_history.experiment_mode
+            if run_history.experiment_mode in ("direct", "no_rag", "adaptive_rag", "always_rag")
+            else "adaptive_rag"
+        )  # type: ignore[assignment]
 
         state: GraphState = {
             "requirement": run_history.requirement,
-            "test_input": "",
+            "test_input": effective_test_input,
+            "test_cases": effective_test_cases,
+            "expected_output": effective_expected,
+            "experiment_mode": mode,
             # ↓ This is the key flag — feedback path, NOT run_memory path
             "is_continuation": True,
             "user_feedback": user_feedback,

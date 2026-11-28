@@ -15,6 +15,13 @@ ErrorCategory = Literal[
     "uncommon_pattern",
 ]
 
+ExperimentMode = Literal[
+    "direct",        # Config A: one-shot generation, no repair
+    "no_rag",        # Config B: iterative self-debugging without RAG
+    "adaptive_rag",  # Config C: iterative self-debugging with selective RAG
+    "always_rag",    # Config D: iterative self-debugging with always-on RAG
+]
+
 
 # ---------------------------------------------------------------------------
 # Sub-models (unchanged schema, kept identical for back-compat)
@@ -33,6 +40,9 @@ class ExecutionRecord(BaseModel):
     traceback: str
     success: bool
     execution_time_ms: float
+    tests_passed: int = 0
+    tests_total: int = 0
+    test_passed: bool | None = None
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
@@ -100,6 +110,10 @@ class RunHistory(BaseModel):
 
     run_id: UUID = Field(default_factory=uuid4)
     requirement: str
+    experiment_mode: str = "adaptive_rag"
+    test_input: str = ""
+    test_cases: str = ""
+    expected_output: str = ""
     start_time: datetime = Field(default_factory=datetime.now)
     end_time: datetime | None = None
 
@@ -136,6 +150,9 @@ class GraphState(TypedDict):
     # ── Input ────────────────────────────────────────────────────────────
     requirement: str
     test_input: str                     # piped to stdin during execution
+    test_cases: str                     # optional Python assert test suite
+    expected_output: str                # optional expected stdout for DSA checks
+    experiment_mode: ExperimentMode     # direct | no_rag | adaptive_rag | always_rag
 
     # ── Re-prompt / continuation fields ─────────────────────────────────
     # is_continuation=True  → user gave feedback on an active unresolved run.

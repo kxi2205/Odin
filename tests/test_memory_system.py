@@ -586,3 +586,40 @@ class TestContinuationDoesNotQueryRunMemory:
         assert rh.error_message == "RuntimeError: 503 UNAVAILABLE"
         reloaded = real_persistence.load_run(rh.run_id)
         assert reloaded.error_message == "RuntimeError: 503 UNAVAILABLE"
+
+    @pytest.mark.asyncio
+    async def test_continue_run_preserves_and_updates_test_input(self, sample_run):
+        """continue_run() preserves existing test_input instead of wiping it to empty string."""
+        captured_states = []
+
+        async def fake_ainvoke(state):
+            captured_states.append(dict(state))
+            return {"success": True}
+
+        with (
+            patch("odin.backend.build_graph") as mock_build,
+            patch("odin.backend.RunHistoryPersistence") as mock_pers_cls,
+        ):
+            mock_graph = MagicMock()
+            mock_graph.ainvoke = fake_ainvoke
+            mock_build.return_value = mock_graph
+
+            mock_persistence = MagicMock()
+            mock_persistence.save_run.return_value = Path("/tmp/x")
+            mock_pers_cls.return_value = mock_persistence
+
+            with patch("odin.backend.config") as mock_cfg:
+                mock_cfg.max_iterations = 3
+                mock_cfg.execution_timeout = 5
+                mock_cfg.validate_config = MagicMock()
+                mock_cfg.ensure_directories = MagicMock()
+
+                sample_run.test_input = "racecar\n"
+                from odin.backend import OdinBackend
+                backend = OdinBackend(use_run_memory=False)
+                await backend.continue_run(sample_run, "handle uppercase")
+
+        assert captured_states[0]["test_input"] == "racecar\n"
+        # Fresh continuation budget: current_iteration (2) + max_iterations (3) = 5
+        assert captured_states[0]["max_iterations"] == 5
+

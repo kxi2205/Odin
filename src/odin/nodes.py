@@ -94,7 +94,7 @@ def generate_node(state: GraphState) -> dict[str, Any]:
 
 
 def execute_node(state: GraphState) -> dict[str, Any]:
-    """Execute the current code in a sandboxed subprocess."""
+    """Execute the current code in a sandboxed subprocess and verify tests."""
     logger.info("=== EXECUTE NODE ===")
     state["run_history"].add_stage_timestamp("execute")
 
@@ -105,15 +105,19 @@ def execute_node(state: GraphState) -> dict[str, Any]:
         files,
         timeout=state["execution_timeout"],
         test_input=state["test_input"],
+        test_cases=state.get("test_cases", ""),
+        expected_output=state.get("expected_output", ""),
     )
     execution.iteration = iteration
     state["run_history"].executions.append(execution)
 
     logger.info(
-        "Execution iter %d: %s (%.2fms)",
+        "Execution iter %d: %s (%.2fms, tests=%d/%d)",
         iteration,
         "SUCCESS" if execution.success else "FAILURE",
         execution.execution_time_ms,
+        execution.tests_passed,
+        execution.tests_total,
     )
     if not execution.success:
         logger.error("Error: %.200s", execution.stderr)
@@ -133,7 +137,8 @@ def analyze_error_node(state: GraphState) -> dict[str, Any]:
         logger.info("Execution successful — no error to analyse")
         return {"should_end": True}
 
-    category, reasoning = classify_error(execution, test_passed=False)
+    test_passed = bool(execution.test_passed) if execution.test_passed is not None else False
+    category, reasoning = classify_error(execution, test_passed=test_passed)
     error_analysis = ErrorAnalysis(iteration=iteration, category=category, reasoning=reasoning)
     state["run_history"].error_analyses.append(error_analysis)
 
@@ -142,15 +147,23 @@ def analyze_error_node(state: GraphState) -> dict[str, Any]:
 
 
 def retrieve_node(state: GraphState) -> dict[str, Any]:
-    """Conditionally retrieve from odin_knowledge based on error category."""
+    """Conditionally retrieve from odin_knowledge based on experiment mode & error category."""
     logger.info("=== RETRIEVE NODE ===")
     state["run_history"].add_stage_timestamp("retrieve")
 
     error_analysis = state["last_error_analysis"]
     execution = state["last_execution"]
     iteration = state["iteration"]
+    mode = state.get("experiment_mode", "adaptive_rag")
 
-    do_retrieve, decision_reason = should_retrieve(error_analysis.category)
+    if mode == "no_rag":
+        do_retrieve = False
+        decision_reason = "Retrieval disabled by experiment mode (no_rag / Config B)"
+    elif mode == "always_rag":
+        do_retrieve = True
+        decision_reason = f"Retrieval forced by experiment mode (always_rag) for '{error_analysis.category}'"
+    else:
+        do_retrieve, decision_reason = should_retrieve(error_analysis.category)
 
     if not do_retrieve:
         logger.info("Skipping retrieval: %s", decision_reason)
@@ -173,13 +186,26 @@ def retrieve_node(state: GraphState) -> dict[str, Any]:
 
 
 def repair_node(state: GraphState) -> dict[str, Any]:
-    """Repair code given execution error + optional retrieved docs."""
+    """Repair code given execution error, prior debugging history, and optional retrieved docs."""
     logger.info("=== REPAIR NODE ===")
     state["run_history"].add_stage_timestamp("repair")
 
     iteration = state["iteration"] + 1
     execution = state["last_execution"]
     retrieval = state["last_retrieval"]
+
+    # Build concise history of earlier failed attempts (excluding current failure)
+    run_history = state["run_history"]
+    cat_by_iter = {ea.iteration: ea.category for ea in run_history.error_analyses}
+    previous_attempts = [
+        {
+            "iteration": str(ex.iteration),
+            "category": cat_by_iter.get(ex.iteration, "error"),
+            "error": (ex.stderr or ex.traceback)[:250],
+        }
+        for ex in run_history.executions[:-1]
+        if not ex.success
+    ]
 
     files, token_usage = repair_code(
         requirement=state["requirement"],
@@ -188,6 +214,7 @@ def repair_node(state: GraphState) -> dict[str, Any]:
         traceback=execution.traceback,
         iteration=iteration,
         retrieval=retrieval if retrieval and retrieval.triggered else None,
+        previous_attempts=previous_attempts or None,
     )
 
     token_usage.iteration = iteration

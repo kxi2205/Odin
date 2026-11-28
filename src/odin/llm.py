@@ -9,6 +9,8 @@ Handles:
 from __future__ import annotations
 
 import logging
+import re
+import time
 from typing import Optional
 
 from google import genai
@@ -20,11 +22,39 @@ from odin.state import FileContent, PastRunContext, RetrievalRecord, TokenUsage
 logger = logging.getLogger(__name__)
 
 _GEN_CFG = types.GenerateContentConfig(temperature=0.2, max_output_tokens=4096)
+_RETRYABLE_STATUS_TOKENS = ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED")
 
 
 def _get_client() -> genai.Client:
     """Create a Gemini client lazily using the configured API key."""
     return genai.Client(api_key=config.gemini_api_key)
+
+
+def _generate_with_retry(prompt: str, max_retries: int = 3):
+    """Call Gemini generate_content with exponential backoff on transient 503/429 errors."""
+    client = _get_client()
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return client.models.generate_content(
+                model=config.gemini_model,
+                contents=prompt,
+                config=_GEN_CFG,
+            )
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc)
+            is_retryable = any(tok in msg for tok in _RETRYABLE_STATUS_TOKENS)
+            if not is_retryable or attempt == max_retries - 1:
+                raise
+            delay = 2 ** attempt
+            logger.warning(
+                "Transient Gemini error (%s); retrying in %ds (attempt %d/%d)",
+                msg[:120], delay, attempt + 1, max_retries,
+            )
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _extract_token_usage(
@@ -78,12 +108,7 @@ def generate_code(
     else:
         prompt = _build_single_file_generate_prompt(requirement, past_run_context)
 
-    client = _get_client()
-    response = client.models.generate_content(
-        model=config.gemini_model,
-        contents=prompt,
-        config=_GEN_CFG,
-    )
+    response = _generate_with_retry(prompt)
 
     token_usage = _extract_token_usage(response, iteration, "generate")
     files = _parse_code_response(response.text or "", is_multi_file)
@@ -98,8 +123,9 @@ def repair_code(
     traceback: str,
     iteration: int,
     retrieval: Optional[RetrievalRecord] = None,
+    previous_attempts: Optional[list[dict[str, str]]] = None,
 ) -> tuple[list[FileContent], TokenUsage]:
-    """Repair code given an execution error and optional retrieved context.
+    """Repair code given an execution error, prior debugging history, and optional retrieved context.
 
     For multi-file projects this implements context assembly:
     - Parse traceback to find which files are involved.
@@ -114,19 +140,24 @@ def repair_code(
 
     if len(previous_files) == 1:
         prompt = _build_single_file_repair_prompt(
-            requirement, previous_files[0].content, error_message, traceback, retrieval
+            requirement,
+            previous_files[0].content,
+            error_message,
+            traceback,
+            retrieval,
+            previous_attempts=previous_attempts,
         )
     else:
         prompt = _build_multi_file_repair_prompt(
-            requirement, relevant_files, error_message, traceback, retrieval
+            requirement,
+            relevant_files,
+            error_message,
+            traceback,
+            retrieval,
+            previous_attempts=previous_attempts,
         )
 
-    client = _get_client()
-    response = client.models.generate_content(
-        model=config.gemini_model,
-        contents=prompt,
-        config=_GEN_CFG,
-    )
+    response = _generate_with_retry(prompt)
 
     token_usage = _extract_token_usage(response, iteration, "repair")
     is_multi = len(previous_files) > 1
@@ -160,12 +191,7 @@ def apply_feedback(
     is_multi = len(current_files) > 1
     prompt = _build_feedback_prompt(requirement, current_files, user_feedback, is_multi)
 
-    client = _get_client()
-    response = client.models.generate_content(
-        model=config.gemini_model,
-        contents=prompt,
-        config=_GEN_CFG,
-    )
+    response = _generate_with_retry(prompt)
 
     token_usage = _extract_token_usage(response, iteration, "feedback")
     files = _parse_code_response(response.text or "", is_multi)
@@ -235,12 +261,26 @@ def _build_multi_file_generate_prompt(
     )
 
 
+def _format_previous_attempts(previous_attempts: Optional[list[dict[str, str]]]) -> str:
+    """Format prior failed debugging attempts so the LLM avoids repeating fixes."""
+    if not previous_attempts:
+        return ""
+    lines = ["\n\nPrevious Debugging History (avoid repeating failed approaches):"]
+    for item in previous_attempts:
+        lines.append(
+            f"- Iteration {item.get('iteration', '?')} [{item.get('category', 'error')}]: "
+            f"{item.get('error', '').strip()[:250]}"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _build_single_file_repair_prompt(
     requirement: str,
     failing_code: str,
     error_message: str,
     traceback: str,
     retrieval: Optional[RetrievalRecord],
+    previous_attempts: Optional[list[dict[str, str]]] = None,
 ) -> str:
     prompt = (
         f"You are debugging Python code. Fix the error.\n\n"
@@ -249,14 +289,15 @@ def _build_single_file_repair_prompt(
         f"Error Message:\n{error_message}\n\n"
         f"Full Traceback:\n{traceback}\n"
     )
+    prompt += _format_previous_attempts(previous_attempts)
     if retrieval and retrieval.chunks:
         prompt += "\n\nRelevant Documentation:\n"
         for i, chunk in enumerate(retrieval.chunks, 1):
             prompt += f"\n--- Reference {i} ---\n{chunk['content']}\n"
     prompt += (
         "\nRequirements:\n"
-        "- Fix the error and return corrected code\n"
-        "- Do not use markdown code fences (```)\n"
+        "- Fix the error and return complete corrected Python code\n"
+        "- Do not use markdown code fences (```) or FILE: headers\n"
         "- Preserve the original intent\n\n"
         "Generate only the corrected code, nothing else."
     )
@@ -269,11 +310,13 @@ def _build_multi_file_repair_prompt(
     error_message: str,
     traceback: str,
     retrieval: Optional[RetrievalRecord],
+    previous_attempts: Optional[list[dict[str, str]]] = None,
 ) -> str:
     prompt = f"You are debugging a Python project. Fix the error.\n\nOriginal Task: {requirement}\n\nProject Files:\n"
     for file in relevant_files:
         prompt += f"\nFILE: {file.path}\n{file.content}\n"
     prompt += f"\nError Message:\n{error_message}\n\nFull Traceback:\n{traceback}\n"
+    prompt += _format_previous_attempts(previous_attempts)
     if retrieval and retrieval.chunks:
         prompt += "\n\nRelevant Documentation:\n"
         for i, chunk in enumerate(retrieval.chunks, 1):
@@ -295,20 +338,22 @@ def _build_feedback_prompt(
     is_multi: bool,
 ) -> str:
     """Prompt that incorporates the user's explicit dissatisfaction/correction."""
-    files_section = ""
-    for f in current_files:
-        files_section += f"\nFILE: {f.path}\n{f.content}\n"
-
-    format_instruction = (
-        "- Format multi-file output as FILE: path\\n<code> blocks\n"
-        if is_multi
-        else "- Return only the complete corrected code\n"
-    )
+    if is_multi:
+        files_section = ""
+        for f in current_files:
+            files_section += f"\nFILE: {f.path}\n{f.content}\n"
+        format_instruction = "- Format multi-file output as FILE: path\\n<code> blocks\n"
+    else:
+        files_section = current_files[0].content if current_files else ""
+        format_instruction = (
+            "- Return ONLY the complete corrected Python code\n"
+            "- Do NOT include any FILE: header lines\n"
+        )
 
     return (
         "You are revising Python code based on user feedback.\n\n"
         f"Original Task: {requirement}\n\n"
-        f"Current Code:\n{files_section}\n"
+        f"Current Code:\n{files_section}\n\n"
         f"User Feedback:\n{user_feedback}\n\n"
         "Requirements:\n"
         "- Address the user's feedback completely\n"
@@ -319,14 +364,22 @@ def _build_feedback_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Parsing & helpers (unchanged logic, kept here for locality)
+# Parsing & helpers
 # ---------------------------------------------------------------------------
+
+def _clean_single_file_code(response_text: str) -> str:
+    """Strip markdown fences and accidental leading FILE: header lines."""
+    code = response_text.strip()
+    code = re.sub(r"^```(?:python)?\s*|\s*```$", "", code, flags=re.IGNORECASE).strip()
+    # Guard against models echoing 'FILE: main.py' on single-file prompts
+    code = re.sub(r"^\s*FILE:\s*\S+\s*\r?\n", "", code, count=1).strip()
+    code = re.sub(r"^```(?:python)?\s*|\s*```$", "", code, flags=re.IGNORECASE).strip()
+    return code
+
 
 def _parse_code_response(response_text: str, is_multi_file: bool) -> list[FileContent]:
     if not is_multi_file:
-        code = response_text.strip()
-        code = code.removeprefix("```python").removeprefix("```").removesuffix("```").strip()
-        return [FileContent(path="main.py", content=code)]
+        return [FileContent(path="main.py", content=_clean_single_file_code(response_text))]
 
     files: list[FileContent] = []
     current_path: Optional[str] = None
@@ -346,8 +399,7 @@ def _parse_code_response(response_text: str, is_multi_file: bool) -> list[FileCo
 
     if not files:
         logger.warning("Failed to parse multi-file response, treating as single file")
-        code = response_text.strip().removeprefix("```python").removeprefix("```").removesuffix("```").strip()
-        return [FileContent(path="main.py", content=code)]
+        return [FileContent(path="main.py", content=_clean_single_file_code(response_text))]
 
     return files
 

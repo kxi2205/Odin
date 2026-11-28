@@ -306,11 +306,13 @@ class OdinTUI(App):
 
         # Clear the feedback input
         self.query_one("#feedback-input", Input).value = ""
+        test_input = self.query_one("#test-input", Input).value.strip()
 
         try:
             updated = await self._backend.continue_run(
                 run_history=run_history,
                 user_feedback=feedback,
+                test_input=test_input,
             )
         except Exception as exc:
             logger.exception("Continuation failed")
@@ -400,13 +402,18 @@ class OdinTUI(App):
             history_widget.add(f"✗ Failed: {err_short[:70]}")
 
     def _copy_output_files(self, run_history: RunHistory, output_dir: str) -> str:
-        """Copy the final generated files to the user's chosen output directory.
+        """Copy the final generated files to a per-run subfolder in the user's output directory.
 
-        The authoritative copy already lives under outputs/ (written by the
-        backend).  This is an additional convenience copy to wherever the user
-        pointed the output-dir field.
+        Using a per-run subfolder prevents newer tasks from overwriting earlier tasks' main.py.
         """
-        out = Path(output_dir).resolve()
+        from odin.persistence import _make_run_dir_name
+
+        base_out = Path(output_dir).resolve()
+        if base_out.exists() and base_out.is_file():
+            raise ValueError(
+                f"Output path '{base_out}' is a file, not a folder. Please choose a folder path."
+            )
+        out = base_out / _make_run_dir_name(run_history.run_id, run_history.requirement)
         out.mkdir(parents=True, exist_ok=True)
 
         final = run_history.code_versions[-1]

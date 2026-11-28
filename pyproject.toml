@@ -9,13 +9,17 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "chromadb>=0.5.0",
+    "fastapi>=0.115.0",
     "google-genai>=1.0.0",
     "langgraph>=0.2.0",
+    "matplotlib>=3.8.0",
     "pandas>=2.0.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
     "sentence-transformers>=2.0.0",
+    "streamlit>=1.38.0",
     "textual>=0.80.0",
+    "uvicorn>=0.30.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +30,7 @@ dev = [
 
 [project.scripts]
 odin = "odin.main:main"
+odin-api = "odin.api:main"
 odin-ingest = "odin.rag.ingest:main"
 
 [build-system]

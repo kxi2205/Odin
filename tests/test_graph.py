@@ -34,10 +34,17 @@ def _make_exec(success: bool, stderr: str = "", traceback: str = "") -> Executio
     )
 
 
-def _make_state(run_history: RunHistory, max_iterations: int = 5) -> GraphState:
+def _make_state(
+    run_history: RunHistory,
+    max_iterations: int = 5,
+    experiment_mode: str = "adaptive_rag",
+) -> GraphState:
     return {
         "requirement": run_history.requirement,
         "test_input": "",
+        "test_cases": "",
+        "expected_output": "",
+        "experiment_mode": experiment_mode,  # type: ignore[typeddict-item]
         "is_continuation": False,
         "user_feedback": "",
         "past_run_context": None,
@@ -207,3 +214,49 @@ async def test_retrieval_routing_reevaluated(mock_graph_deps):
         assert len(rets) == 2
         assert rets[0].triggered is False  # syntax
         assert rets[1].triggered is True   # library_api
+
+
+@pytest.mark.asyncio
+async def test_graph_experiment_modes_no_rag_and_always_rag(mock_graph_deps):
+    mock_gen, mock_rep, mock_exec, mock_class = mock_graph_deps
+    graph = build_graph()
+
+    # 1. Config B (no_rag): must SKIP retrieval even for library_api
+    mock_gen.return_value = ([], _make_token_usage("generate", 1))
+    mock_rep.return_value = ([], _make_token_usage("repair", 2))
+    mock_exec.side_effect = [
+        _make_exec(success=False, stderr="AttributeError", traceback="AttributeError"),
+        _make_exec(success=True),
+    ]
+    mock_class.return_value = ("library_api", "pandas API misuse")
+
+    rh_no_rag = RunHistory(requirement="test no_rag")
+    await graph.ainvoke(_make_state(rh_no_rag, max_iterations=3, experiment_mode="no_rag"))
+    assert len(rh_no_rag.retrievals) == 1
+    assert rh_no_rag.retrievals[0].triggered is False
+
+    # 2. Config D (always_rag): must TRIGGER retrieval even for syntax
+    mock_exec.side_effect = [
+        _make_exec(success=False, stderr="SyntaxError", traceback="SyntaxError"),
+        _make_exec(success=True),
+    ]
+    mock_class.return_value = ("syntax", "SyntaxError")
+
+    rh_always = RunHistory(requirement="test always_rag")
+    with patch("odin.nodes.RAGRetriever") as mock_rag_cls:
+        mock_rag = MagicMock()
+        mock_rag.retrieve.return_value = RetrievalRecord(
+            iteration=1,
+            triggered=True,
+            decision_reason="forced",
+            query="syntax error",
+            chunks=[],
+            retrieval_latency_ms=2.0,
+            total_tokens=0,
+        )
+        mock_rag_cls.return_value = mock_rag
+        await graph.ainvoke(_make_state(rh_always, max_iterations=3, experiment_mode="always_rag"))
+
+    assert len(rh_always.retrievals) == 1
+    assert rh_always.retrievals[0].triggered is True
+
