@@ -58,7 +58,7 @@ def load_mbpp_benchmark(limit: int = 20) -> list[dict[str, Any]]:
     """Load MBPP tasks via HuggingFace datasets."""
     from datasets import load_dataset
 
-    ds = load_dataset("mbpp", "sanitized", split=f"test[:{limit}]")
+    ds = load_dataset("google-research-datasets/mbpp", "sanitized", split=f"test[:{limit}]")
     tasks: list[dict[str, Any]] = []
     for row in ds:
         test_code = "\n".join(row.get("test_list", []))

@@ -134,7 +134,11 @@ def _save_to_user_folder(run_history: RunHistory, folder_path: str) -> str:
     return str(dest_dir)
 
 
-def _render_run_details(run_history: RunHistory, persistence: RunHistoryPersistence) -> None:
+def _render_run_details(
+    run_history: RunHistory,
+    persistence: RunHistoryPersistence,
+    key_prefix: str = "live",
+) -> None:
     """Render full per-iteration breakdown for a RunHistory object."""
     status = run_history.final_status
     if status == "success":
@@ -193,7 +197,7 @@ def _render_run_details(run_history: RunHistory, persistence: RunHistoryPersiste
                     if ex.tests_total > 0:
                         st.markdown(f"**Tests**: `{ex.tests_passed}/{ex.tests_total}` passed")
                     if ex.stdout:
-                        st.text_area("STDOUT", ex.stdout, height=90, disabled=True, key=f"stdout_{run_history.run_id}_{it}")
+                        st.text_area("STDOUT", ex.stdout, height=90, disabled=True, key=f"{key_prefix}_stdout_{run_history.run_id}_{it}")
                 with col_b:
                     if tk:
                         st.markdown(
@@ -201,7 +205,7 @@ def _render_run_details(run_history: RunHistory, persistence: RunHistoryPersiste
                             f"(in: {tk.input_tokens}, out: {tk.output_tokens})"
                         )
                     if ex.stderr:
-                        st.text_area("STDERR / Traceback", ex.stderr, height=90, disabled=True, key=f"stderr_{run_history.run_id}_{it}")
+                        st.text_area("STDERR / Traceback", ex.stderr, height=90, disabled=True, key=f"{key_prefix}_stderr_{run_history.run_id}_{it}")
 
             if ea:
                 st.info(f"**Error Analysis** — Category: `{ea.category}` | {ea.reasoning}")
@@ -229,7 +233,7 @@ def _render_run_details(run_history: RunHistory, persistence: RunHistoryPersiste
                 data=final_files[0].content,
                 file_name=final_files[0].path,
                 mime="text/x-python",
-                key=f"dl_{run_history.run_id}",
+                key=f"{key_prefix}_dl_{run_history.run_id}",
             )
 
 
@@ -351,35 +355,41 @@ with tab_debug:
     if active_run is not None:
         if st.session_state.get("last_saved_dir"):
             st.info(f"Final working code copied to: `{st.session_state['last_saved_dir']}`")
-        _render_run_details(active_run, persistence)
+        _render_run_details(active_run, persistence, key_prefix="live")
 
         st.divider()
         st.subheader("Send Feedback to Revise This Run")
-        fb_text = st.text_input(
-            "Describe what to change or fix",
-            placeholder="e.g. 'Read input at runtime and handle empty input gracefully'",
-            key="feedback_box",
-        )
-        if st.button("Send Feedback", disabled=not fb_text.strip()):
-            with st.spinner("Applying feedback and re-verifying in sandbox..."):
-                backend = _get_backend(use_run_memory)
-                updated = _run_async(
-                    backend.continue_run(
-                        run_history=active_run,
-                        user_feedback=fb_text.strip(),
-                        test_input=test_input,
-                        test_cases=test_cases,
-                        expected_output=expected_output,
-                        execution_timeout=execution_timeout,
+        with st.form("feedback_form", clear_on_submit=True):
+            fb_text = st.text_input(
+                "Describe what to change or fix",
+                placeholder="e.g. 'Read input at runtime and handle empty input gracefully'",
+                key="feedback_box",
+            )
+            fb_submitted = st.form_submit_button("Send Feedback")
+
+        if fb_submitted:
+            if not fb_text.strip():
+                st.warning("Please enter feedback before submitting.")
+            else:
+                with st.spinner("Applying feedback and re-verifying in sandbox..."):
+                    backend = _get_backend(use_run_memory)
+                    updated = _run_async(
+                        backend.continue_run(
+                            run_history=active_run,
+                            user_feedback=fb_text.strip(),
+                            test_input=test_input,
+                            test_cases=test_cases,
+                            expected_output=expected_output,
+                            execution_timeout=execution_timeout,
+                        )
                     )
-                )
-            st.session_state["active_run"] = updated
-            if output_dir.strip() and updated.final_status == "success":
-                try:
-                    st.session_state["last_saved_dir"] = _save_to_user_folder(updated, output_dir.strip())
-                except Exception as exc:
-                    st.error(f"Could not save to output folder: {exc}")
-            st.rerun()
+                st.session_state["active_run"] = updated
+                if output_dir.strip() and updated.final_status == "success":
+                    try:
+                        st.session_state["last_saved_dir"] = _save_to_user_folder(updated, output_dir.strip())
+                    except Exception as exc:
+                        st.error(f"Could not save to output folder: {exc}")
+                st.rerun()
 
 # ---------------------------------------------------------------------------
 # Tab 2: Run History & Metrics
@@ -408,7 +418,7 @@ with tab_history:
 
         if rows:
             df_runs = pd.DataFrame(rows)
-            st.dataframe(df_runs, use_container_width=True, hide_index=True)
+            st.dataframe(df_runs, width="stretch", hide_index=True)
 
             batch = persistence.compute_batch_metrics([r["run_id"] for r in runs])
             b1, b2, b3, b4 = st.columns(4)
@@ -435,7 +445,7 @@ with tab_history:
         )
         if selected_id:
             loaded = persistence.load_run(selected_id)
-            _render_run_details(loaded, persistence)
+            _render_run_details(loaded, persistence, key_prefix="history")
 
 # ---------------------------------------------------------------------------
 # Tab 3: Research Evaluation Dashboard
@@ -458,7 +468,7 @@ with tab_research:
     else:
         chosen_csv = st.selectbox("Select experiment result file", csv_files, format_func=lambda p: p.name)
         df = pd.read_csv(chosen_csv)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
         if {"config", "success", "total_iterations", "total_llm_tokens"}.issubset(df.columns):
             st.subheader("Comparative Summary (Direct → No-RAG → Adaptive RAG → Always-On RAG)")
@@ -473,7 +483,7 @@ with tab_research:
                 retrieval_freq=("retrieval_triggered_count", lambda s: (s > 0).mean()),
                 avg_wall_sec=("wall_time_seconds", "mean"),
             )
-            st.dataframe(summary, use_container_width=True, hide_index=True)
+            st.dataframe(summary, width="stretch", hide_index=True)
 
             c_left, c_right = st.columns(2)
             with c_left:
@@ -491,7 +501,7 @@ with tab_research:
                 values="success",
                 aggfunc="mean",
             ).fillna(0.0)
-            st.dataframe(pivot, use_container_width=True)
+            st.dataframe(pivot, width="stretch")
             st.bar_chart(pivot)
 
         png_files = sorted(results_dir.glob("*.png"))
