@@ -234,14 +234,27 @@ def main() -> None:
         help="Which experimental configurations to run",
     )
     parser.add_argument("--limit", type=int, default=0, help="Limit number of tasks (0 = all)")
+    parser.add_argument(
+        "--per-category",
+        type=int,
+        default=0,
+        help="Sample N tasks per error category from custom benchmark (0 = disabled)",
+    )
     parser.add_argument("--max-iterations", type=int, default=3, help="Max iterations for iterative configs")
-    parser.add_argument("--timeout", type=int, default=5, help="Per-execution sandbox timeout (sec)")
+    parser.add_argument("--timeout", type=int, default=10, help="Per-execution sandbox timeout (sec)")
     parser.add_argument("--output-prefix", default="experiment_runs", help="Output filename prefix")
     args = parser.parse_args()
 
     if args.dataset == "custom":
         tasks = load_custom_benchmark()
-        if args.limit > 0:
+        if args.per_category > 0:
+            by_cat: dict[str, list[dict[str, Any]]] = {}
+            for t in tasks:
+                cat = t["target_category"]
+                if len(by_cat.get(cat, [])) < args.per_category:
+                    by_cat.setdefault(cat, []).append(t)
+            tasks = [t for group in by_cat.values() for t in group]
+        elif args.limit > 0:
             tasks = tasks[:args.limit]
     elif args.dataset == "mbpp":
         tasks = load_mbpp_benchmark(limit=args.limit or 20)

@@ -54,6 +54,12 @@ _VERSION_SPECIFIC_PATTERNS = [
     r"no longer supported",
     r"has been renamed to",
     r"use .+ instead",
+    r"'DataFrame' object has no attribute '(iteritems|applymap|swapaxes)'",
+    r"fillna\(\) got an unexpected keyword argument 'method'",
+    r"module 'numpy' has no attribute '(int|float|bool|complex|object|str|trapz|in1d|row_stack|product|cumproduct)'",
+    r"OneHotEncoder\.__init__\(\) got an unexpected keyword argument 'sparse'",
+    r"got an unexpected keyword argument 'squared'",
+    r"has no attribute '(parse_obj|parse_raw)'",
 ]
 
 # Library names that, when appearing in traceback, suggest API issues
@@ -219,17 +225,30 @@ def _detect_uncommon_pattern(traceback: str, stderr: str) -> Optional[str]:
     """Heuristic for detecting uncommon patterns.
     
     This looks for:
-    - References to itertools, functools, collections.abc (less common)
-    - Errors in asyncio/async contexts
+    - References to itertools, functools, collections.abc, asyncio, heapq
+    - Built-in/C-extension functions whose module name doesn't appear in tracebacks
+      (e.g. functools.reduce(), itertools.groupby(), MutableMapping, event loop)
     - Complex method chaining or descriptor protocol issues
     
     Returns the matched signal name if detected, else None.
     """
-    uncommon_modules = ["itertools", "functools", "collections.abc", "asyncio"]
+    uncommon_modules = ["itertools", "functools", "collections.abc", "asyncio", "heapq"]
+    combined = f"{traceback}\n{stderr}"
     
     for module in uncommon_modules:
-        if module in traceback:
+        if module in combined:
             return module
+
+    uncommon_patterns = [
+        (r"\breduce\(", "functools.reduce"),
+        (r"\bgroupby\b", "itertools.groupby"),
+        (r"\bMutableMapping\b|\bMutableSequence\b", "collections.abc"),
+        (r"\blru_cache\b", "functools.lru_cache"),
+        (r"event loop|coroutine", "asyncio"),
+    ]
+    for pat, label in uncommon_patterns:
+        if re.search(pat, combined, re.IGNORECASE):
+            return label
     
     # Async-related errors can be uncommon patterns
     if "async" in stderr.lower() or "await" in stderr.lower():

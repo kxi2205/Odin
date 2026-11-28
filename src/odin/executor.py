@@ -501,9 +501,8 @@ def _create_windows_job_object(memory_limit_mb: int) -> int | None:
             | JOB_OBJECT_LIMIT_PROCESS_MEMORY
             | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
         )
-        info.BasicLimitInformation.ActiveProcessLimit = 4
-        # Add headroom for Python interpreter + scientific libraries if imported
-        info.ProcessMemoryLimit = max(memory_limit_mb, 256) * 1024 * 1024
+        info.BasicLimitInformation.ActiveProcessLimit = 16
+        info.ProcessMemoryLimit = max(memory_limit_mb, 512) * 1024 * 1024
 
         ok = kernel32.SetInformationJobObject(
             job,

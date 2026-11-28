@@ -33,10 +33,10 @@ class OdinConfig(BaseModel):
         default_factory=lambda: int(os.getenv("ODIN_MAX_ITERATIONS", "5"))
     )
     execution_timeout: int = Field(
-        default_factory=lambda: int(os.getenv("ODIN_EXECUTION_TIMEOUT", "5"))
+        default_factory=lambda: int(os.getenv("ODIN_EXECUTION_TIMEOUT", "10"))
     )
     sandbox_memory_limit_mb: int = Field(
-        default_factory=lambda: int(os.getenv("ODIN_SANDBOX_MEMORY_MB", "256"))
+        default_factory=lambda: int(os.getenv("ODIN_SANDBOX_MEMORY_MB", "1024"))
     )
     sandbox_file_size_limit_mb: int = Field(
         default_factory=lambda: int(os.getenv("ODIN_SANDBOX_FILE_SIZE_MB", "10"))

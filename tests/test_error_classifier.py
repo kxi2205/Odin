@@ -129,3 +129,33 @@ def test_successful_execution():
     
     # Should still return a category (likely "logical")
     assert category == "logical"
+
+
+def test_c_builtin_functools_reduce_classified_as_uncommon_pattern():
+    execution = ExecutionRecord(
+        iteration=1,
+        stdout="",
+        stderr="Traceback (most recent call last):\n  File \"main.py\", line 3\nTypeError: reduce() of empty iterable with no initial value",
+        exit_code=1,
+        traceback="TypeError: reduce() of empty iterable with no initial value",
+        success=False,
+        execution_time_ms=5.0,
+    )
+    category, reasoning = classify_error(execution, test_passed=False)
+    assert category == "uncommon_pattern"
+    assert "reduce" in reasoning.lower()
+
+
+def test_removed_api_patterns_classified_as_version_specific():
+    for msg in [
+        "TypeError: NDFrame.fillna() got an unexpected keyword argument 'method'",
+        "AttributeError: module 'numpy' has no attribute 'trapz'",
+        "TypeError: OneHotEncoder.__init__() got an unexpected keyword argument 'sparse'",
+    ]:
+        execution = ExecutionRecord(
+            iteration=1, stdout="", stderr=msg, exit_code=1, traceback=msg,
+            success=False, execution_time_ms=5.0,
+        )
+        category, _ = classify_error(execution, test_passed=False)
+        assert category == "version_specific", f"Failed for: {msg}"
+

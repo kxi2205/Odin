@@ -42,7 +42,9 @@ Thumbs.db
 
 # ODIN runtime data — present on disk but not committed
 outputs/
+output/
 chroma_data/
+experiments/results/
 odin.log
 *.log
 
